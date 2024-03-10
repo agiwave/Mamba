@@ -19,24 +19,19 @@ def MambaBlock(args):
         x_and_res = self.in_proj(x)  # shape (b, l, 2 * hidden_dim)
         (x, res) = x_and_res.chunk(2, dim=-1)
         
+        x = np.einsum('bld->bdl',x)
+        state_size = 0
         if state is not None:
+            state_size = self.args.conv_kernel_size-1
             if 'conv_state' in state:
                 conv_state = state['conv_state']
-                conv_state.copy_(np.roll(conv_state, shifts=-l, dims=-1))  # Update state (B D W),
             else:
-                conv_state = np.zeros(b, d * self.args.expand, self.args.conv_kernel_size, device = x.device)
+                conv_state = np.zeros(b, d * self.args.expand, state_size, device = x.device)
                 state['conv_state'] = conv_state
-            # TODO, only support 1 input here. How to support n inputs?
-            conv_state[:, :, -1] = x.squeeze(1)
-            # conv_state[:, :, -l:] = x
-            x = np.sum(conv_state * np.einsum("dlw->dw", self.conv1d.weight), dim=-1)  # (B D)
-            if self.conv1d.bias is not None:
-                x = x + self.conv1d.bias
-            x = x.unsqueeze(1)
-        else:
-            x = np.einsum('bld->bdl',x)
-            x = self.conv1d(x)[:, :, :l]
-            x = np.einsum('bdl->bld', x)
+            x = np.cat((conv_state, x), dim=2)
+            conv_state.copy_(x[:, :, -state_size:])
+        x = self.conv1d(x)[:, :, state_size:state_size+l]
+        x = np.einsum('bdl->bld', x)
         x = np.silu(x)
         y = self.ssm(x,state)
         y = y * np.silu(res)
