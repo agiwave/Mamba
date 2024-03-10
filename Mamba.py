@@ -26,10 +26,9 @@ def MambaBlock(args):
             if 'conv_state' in state:
                 conv_state = state['conv_state']
             else:
-                conv_state = np.zeros(b, d * self.args.expand, state_size, device = x.device)
-                state['conv_state'] = conv_state
+                conv_state = np.zeros(b, self.args.hidden_dim, state_size, device = x.device)
             x = np.cat((conv_state, x), dim=2)
-            conv_state.copy_(x[:, :, -state_size:])
+            state['conv_state'] = x[:, :, -state_size:].detach()
         x = self.conv1d(x)[:, :, state_size:state_size+l]
         x = np.einsum('bdl->bld', x)
         x = np.silu(x)
@@ -110,11 +109,9 @@ def MambaBlock(args):
         # -- Build h --
         if state is not None:
             if 'ssm_state' in state:
-                ssm_state = state['ssm_state']
+                h = state['ssm_state']
             else:
-                ssm_state = np.zeros(b, hidden_dim, self.args.d_state, device=x.device)
-                state['ssm_state'] = ssm_state
-            h = ssm_state
+                h = np.zeros(b, hidden_dim, self.args.d_state, device=x.device)
         else:
             h = np.zeros((b, hidden_dim, n), device=deltaA.device)
 
@@ -125,7 +122,7 @@ def MambaBlock(args):
         
         # -- Save h --
         if state is not None:
-            ssm_state.copy_(h)
+            state['ssm_state'] = h.detach()
         return y + x * D
 
     mamba_args = args.mamba_args
@@ -216,4 +213,3 @@ if __name__ == "__main__":
     mamba = Mamba('data/mamba-370m-hf')
     print('Model loaded')
     print(mamba.generate("Mamba is the"))
-
