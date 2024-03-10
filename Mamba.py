@@ -25,18 +25,28 @@ def MambaBlock(args):
             state_size = self.args.conv_kernel_size-1
             if 'conv_state' in state:
                 conv_state = state['conv_state']
+                ssm_h = state['ssm_state']
             else:
-                conv_state = np.zeros(b, self.args.hidden_dim, state_size, device = x.device)
+                conv_state = np.zeros(b, self.args.hidden_dim, state_size, device=x.device)
+                ssm_h = np.zeros(b, self.args.hidden_dim, self.args.d_state, device=x.device)
             x = np.cat((conv_state, x), dim=2)
+            y = self.conv1d(x)[:, :, state_size:state_size+l]
+            y = np.einsum('bdl->bld', y)
+            y = np.silu(y)
+            y, ssm_h = self.ssm(y,ssm_h)
+            state['ssm_state'] = ssm_h.detach()
             state['conv_state'] = x[:, :, -state_size:].detach()
-        x = self.conv1d(x)[:, :, state_size:state_size+l]
-        x = np.einsum('bdl->bld', x)
-        x = np.silu(x)
-        y = self.ssm(x,state)
+        else:
+            ssm_h = np.zeros(b, self.args.hidden_dim, self.args.d_state, device=x.device)
+            y = self.conv1d(x)[:, :, state_size:state_size+l]
+            y = np.einsum('bdl->bld', y)
+            y = np.silu(y)
+            y, ssm_h = self.ssm(y,ssm_h)
+
         y = y * np.silu(res)
         return self.out_proj(y)
 
-    def ssm(self, x, state):
+    def ssm(self, x, ssm_h):
         """Runs the SSM. See:
             - Algorithm 2 in Section 3.2 in the Mamba paper [1]
             - run_SSM(A, B, C, u) in The Annotated S4 [2]
@@ -57,10 +67,10 @@ def MambaBlock(args):
         x_dbl = self.x_proj(x)  # (b, l, dt_rank + 2*d_state)
         (delta, B, C) = x_dbl.split(split_size=[self.args.dt_rank, d_state, d_state], dim=-1)  # delta: (b, l, dt_rank). B, C: (b, l, n)
         delta = np.softplus(self.dt_proj(delta))  # (b, l, hidden_dim)
-        y = self.selective_scan(x, delta, A, B, C, D, state)  # This is similar to run_SSM(A, B, C, u) in The Annotated S4 [2]
+        y = self.selective_scan(x, delta, A, B, C, D, ssm_h)  # This is similar to run_SSM(A, B, C, u) in The Annotated S4 [2]
         return y
 
-    def selective_scan(self, x, delta, A, B, C, D, state):
+    def selective_scan(self, x, delta, A, B, C, D, ssm_h):
         """Does selective scan algorithm. See:
             - Section 2 State Space Models in the Mamba paper [1]
             - Algorithm 2 in Section 3.2 in the Mamba paper [1]
@@ -106,24 +116,12 @@ def MambaBlock(args):
         deltaBX = np.einsum('bld,bln,bld->bldn', delta, B, x)
         y = np.empty((b, l, hidden_dim), device=deltaA.device)
 
-        # -- Build h --
-        if state is not None:
-            if 'ssm_state' in state:
-                h = state['ssm_state']
-            else:
-                h = np.zeros(b, hidden_dim, self.args.d_state, device=x.device)
-        else:
-            h = np.zeros((b, hidden_dim, n), device=deltaA.device)
-
         # -- TODO, how to fast it in parallel? --
         for i in range(l):
-            h = deltaA[:, i] * h + deltaBX[:, i]
-            y[:,i] = np.einsum('bdn,bn->bd', h, C[:, i]) # BUG? the h is not h(t), it is already set to h(t+1) in prev line
+            ssm_h = deltaA[:, i] * ssm_h + deltaBX[:, i]
+            y[:,i] = np.einsum('bdn,bn->bd', ssm_h, C[:, i]) # BUG? the h is not h(t), it is already set to h(t+1) in prev line
         
-        # -- Save h --
-        if state is not None:
-            state['ssm_state'] = h.detach()
-        return y + x * D
+        return y + x * D, ssm_h
 
     mamba_args = args.mamba_args
     A = np.repeat(np.arange(1, mamba_args.d_state + 1).unsqueeze(0), mamba_args.hidden_dim, 0)
@@ -176,8 +174,7 @@ def Mamba(name):
             dt_rank = "auto",
             conv_kernel_size = 4,
             conv_bias = True,
-            d_state = cfg['state_size'],
-            expand = cfg['expand']
+            d_state = cfg['state_size']
         ),
         bias = False
     )
@@ -212,4 +209,4 @@ def Mamba(name):
 if __name__ == "__main__":
     mamba = Mamba('data/mamba-370m-hf')
     print('Model loaded')
-    print(mamba.generate("Mamba is the"))
+    print(mamba.generate("Mamba is"))
