@@ -9,7 +9,7 @@ The one diff to mamba is: Support input n-length tensor in cache mode not only o
 Please ignore all aka code here. It's a sample proxy to torch:
 
     aka.nn --> torch.nn
-    aka.numpy --> torch + torch.nn.F
+    aka.numpy --> torch + torch.nn.functional
 
 ## Requirements
 
