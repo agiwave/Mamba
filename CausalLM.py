@@ -87,8 +87,6 @@ def CausalLM(args):
         if self.pe is not None:
             x = x + pe
         freqs_cls = self.freqs_cis
-        enable_cache = self.enable_cache
-
         if(state is not None):
             if('layer_states' in state):
                 layer_states = state['layer_states']
