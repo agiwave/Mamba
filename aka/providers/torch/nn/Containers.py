@@ -6,7 +6,7 @@ from .. import numpy as np
 from torch.nn import ModuleList
 
 def register_module_and_parameter(container, name, module):
-    if( isinstance(module, Module)):
+    if( isinstance(module, torch.nn.Module)):
         container.register_module(name, module)
         return True
     else:
@@ -32,24 +32,17 @@ class Module(nn.Module):
                 v = types.MethodType(v, self)
             setattr(self, k, v)
 
-# Sequential
 class Sequential(nn.Module):
     '''
     Sequential class
     '''
     def __init__(self, *args):
         super().__init__()
-        
-        self.args = args
-
-        i=0
-        for m in args:
-            i+=1
-            register_module_and_parameter(self, "Arg:"+str(i), m)
+        self.module_list = torch.nn.ModuleList(args)
 
     def forward(self, x):
-        for m in self.args:
-            x = call_module(m,x)
+        for m in self.module_list:
+            x = m(x)
         return x
 
 # Functional
@@ -99,14 +92,12 @@ class Functional(nn.Module):
     '''
     Functional class
     '''
-    def __init__(self, func, *args, class_method=False, **kwargs):
+    def __init__(self, func, *args, **kwargs):
         super(Functional,self).__init__()
         
         l_args_keys = []
         for i in range(len(args)):
             argv = args[i]
-            if(class_method == True and isinstance(argv, types.FunctionType)):
-                argv = types.MethodType(argv, self)
             k = 'argv'+str(i)
             setattr(self, k, argv)
             l_args_keys.append(k)
@@ -114,20 +105,14 @@ class Functional(nn.Module):
         l_kwargs_keys = []
         for k in kwargs:
             v = kwargs[k]
-            if(class_method == True and isinstance(v, types.FunctionType)):
-                v = types.MethodType(v, self)
             setattr(self, k, v)
             l_kwargs_keys.append(k)
 
         self.args_keys = l_args_keys
         self.kwargs_keys = l_kwargs_keys
-        self._func_ = func if(class_method==False) else types.MethodType(func,self)
-        self._method_ = class_method
+        self._func_ = func
     
     def forward(self, *inputs):
-        if(self._method_):
-            return self._func_(*inputs)
-        else:
-            args = [getattr(self, k) for k in self.args_keys]
-            kwargs = {k:getattr(self, k) for k in self.kwargs_keys}
-            return self._func_(*inputs, *args, **kwargs)
+        args = [getattr(self, k) for k in self.args_keys]
+        kwargs = {k:getattr(self, k) for k in self.kwargs_keys}
+        return self._func_(*inputs, *args, **kwargs)

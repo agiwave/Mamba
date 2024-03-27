@@ -91,14 +91,12 @@ class Functional(Module):
     '''
     Functional class
     '''
-    def __init__(self, func, *args, class_method=False, **kwargs):
+    def __init__(self, func, *args, **kwargs):
         super(Functional,self).__init__()
         
         l_args_keys = []
         for i in range(len(args)):
             argv = args[i]
-            if(class_method == True and isinstance(argv, types.FunctionType)):
-                argv = types.MethodType(argv, self)
             k = 'argv'+str(i)
             setattr(self, k, argv)
             l_args_keys.append(k)
@@ -106,20 +104,14 @@ class Functional(Module):
         l_kwargs_keys = []
         for k in kwargs:
             v = kwargs[k]
-            if(class_method == True and isinstance(v, types.FunctionType)):
-                v = types.MethodType(v, self)
             setattr(self, k, v)
             l_kwargs_keys.append(k)
 
-        self._func_ = func if(class_method==False) else types.MethodType(func,self)
-        self._method_ = class_method
+        self._func_ = func
         self.args_keys = l_args_keys
         self.kwargs_keys = l_kwargs_keys
 
     def call(self, *inputs):
-        if(self._method_):
-            return self._func_(*inputs)
-        else:
-            args = [getattr(self, k) for k in self.args_keys]
-            kwargs = {k:getattr(self, k) for k in self.kwargs_keys}
-            return self._func_(*inputs, *args, **kwargs)
+        args = [getattr(self, k) for k in self.args_keys]
+        kwargs = {k:getattr(self, k) for k in self.kwargs_keys}
+        return self._func_(*inputs, *args, **kwargs)

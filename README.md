@@ -1,15 +1,23 @@
 # Mamba
 
-A simple mamba demo with minimized code. This repo is just for learning and backup. I have no CUDA device yet. So, the code can only run on CPU for now.
+A simple mamba demo with minimized code. This repo is just for learning and backup. The code was tested on CPU only for now.
 
-The major diff to mamba-minimal is: integrated the cache feature to fast generate performance.
+The major diff to mamba-minimal is: 
 
-The one diff to mamba is: Support input n-length tensor in cache mode not only one.
+1. integrated the cache feature to fast generate-performance.
+2. support parallel training(not recurrentlly).
+
+The diff to mamba is: 
+
+1. Support input n-length tensor in infer mode not only one.
+2. Support parallel training on CPU(without CUDA)
+3. Support num_heads arg which is not D only(element-wise). The oringal mamba's num_heads = D, it means element-wise. 
 
 Please ignore all aka code here. It's a sample proxy to torch:
 
     aka.nn --> torch.nn
     aka.numpy --> torch + torch.nn.functional
+    aka.repo --> datasets
 
 ## Requirements
 

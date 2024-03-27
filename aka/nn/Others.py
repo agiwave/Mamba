@@ -1,5 +1,4 @@
 from .. import boot
-from .. import numpy
 
 # Connection
 def Conv2d(*args, **kwargs):return boot.invoke()
@@ -15,6 +14,7 @@ def BatchNorm1d(*args, **kwargs):return boot.invoke()
 def BatchNorm2d(*args, **kwargs):return boot.invoke()
 def LayerNorm(normalize_shape):return boot.invoke()
 def GroupNorm(num_groups, num_channels, eps=1e-05, affine=True):return boot.invoke()
+def RMSNorm(dim: int, eps: float = 1e-5):return boot.invoke()
 
 # Pooling
 def MaxPool1d(*args, **kwargs):return boot.invoke()
@@ -30,8 +30,3 @@ def MSELoss():return boot.invoke()
 def Embedding(num_embeddings, embedding_dim):return boot.invoke()
 
 boot.inject()
-
-def Unfold(kernel_size, stride, padding=1):
-    from .Containers import Functional
-    return Functional(numpy.unfold, kernel_size, stride=stride, padding=padding)
-

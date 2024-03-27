@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
+import aka.numpy as np
 from .Bases import Parameter
-from .Containers import Functional
+from .Containers import Module
 
 from torch.nn import Linear
 from torch.nn import Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d
@@ -12,32 +13,14 @@ from torch.nn import Dropout, Dropout1d, Dropout2d, Dropout3d
 from torch.nn import CrossEntropyLoss, MSELoss
 from torch.nn import Embedding
 
-class Module(nn.Module):
-    def __init__(self, callback_module):
-        super(Module, self).__init__()
-        self.callback_module = callback_module
-
-        i = 0
-        for k in dir(callback_module):
-            attr = getattr(callback_module,k)
-            if(isinstance(attr,nn.Module)):
-                self.add_module("L:"+str(i),attr)
-                i+=1
-
-    def forward(self, *args, **kwargs):
-        return self.callback_module(*args, **kwargs)
-
-# Tensor
-def TrainModule(module, criterion):
-    class TrainModuleCallback:
-        def __init__(self, module, criterion):
-            self.module = module
-            self.criterion = criterion
-
-        def __call__(self, inputs, targets=None):
-            outputs = self.module(inputs)
-            if(targets != None) :
-                return outputs, self.criterion(outputs, targets) 
-            else:
-                return outputs
-    return Module(TrainModuleCallback(module, criterion))
+def RMSNorm(dim: int, eps: float = 1e-5):
+    '''
+    Reference: LLaMA and Gemma
+    '''
+    def forward(self, x):
+        x = (x.float() * np.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)).type_as(x)
+        return x * self.weight
+    return Module(
+        forward = forward,
+        eps = eps,
+        weight = Parameter(np.ones(dim)))

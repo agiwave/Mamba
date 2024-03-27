@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-def Parameter(data=None, shape=None, initializer="zeros", requires_grad=True):
+def Parameter(data=None, shape=None, initializer="xavier_uniform", requires_grad=True):
     if(data == None):
         data = torch.empty(shape)
         match initializer:
@@ -21,7 +21,6 @@ def Parameter(data=None, shape=None, initializer="zeros", requires_grad=True):
                 data = torch.randn(shape)
             case _:
                 raise TypeError("Unknown data initializer:" + initializer)
-                nn.init.kaiming_normal_(data)
     
     return torch.nn.Parameter(data=torch.Tensor(data), requires_grad=requires_grad)
 

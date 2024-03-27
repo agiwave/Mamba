@@ -5,10 +5,9 @@ def save_weights(model, filename=None):return boot.invoke()
 
 def train(
     model, 
-    dataset, 
+    datasets = None, 
     *,
-    data_loader=None,
-    input_targets=False, 
+    data_loader = None,
     persist_filename = None,
     show_chart = False,
     **kwargs):return boot.invoke()
@@ -16,8 +15,8 @@ def train(
 def Trainer(
     model,
     data_loader,
-    input_targets=False,
-    loss="CrossEntropyLoss",
+    data_fields = None,
+    loss_metric = None,
     optimizer="Adam",
     optimizer_kwargs={},
     epochs = 1): return boot.invoke()

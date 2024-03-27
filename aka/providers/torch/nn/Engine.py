@@ -2,6 +2,8 @@ import os
 import time
 import torch
 import torchvision
+import aka.numpy as np
+
 from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader
 from torchinfo import summary
@@ -14,35 +16,41 @@ def save_weights(model, filename):
     torch.save(model.state_dict(), filename)
     return model
 
-def load(filename):
-    return torch.load(filename)
-
-def save(model, filename):
-    return torch.save(model, filename)
-
-def train(model, datasets=None, data_loader=None, 
+def train(
+        model, 
+        datasets=None,
+        *,
+        data_loader = None,
+        collate_fn=None,
         persist_filename = None, 
-        epochs = 1, batch_size=64, 
+        shuffle = True,
+        batch_size = 1,
+        epochs = 1,
         show_chart = False, **kwargs):
+
     # 模型
     if(persist_filename!=None and os.path.exists(persist_filename)):
         load_weights(model, persist_filename)
     summary(model)
 
+    '''
+    The default collate_fn conversion:
+    Element Type:
+        int, float, ... -> Tensor
+        Dict, List, Tuple ... -> Dict(Tensor), List(Tensor), Tuple(Tensor)  (Keep Structure)
+    We need:
+        ?????? How to support huggingface datasets, Only dataset_collate_fn ???????
+    '''
     # -- data loader --
-    if(data_loader is None):
-        train_set, _ = datasets
-        data_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+    if data_loader is None:
+        data_loader = DataLoader(datasets['train'], batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
 
-    trainer = Trainer(model, data_loader=data_loader, epochs=epochs, batch_size=batch_size, **kwargs)
+    # -- trainer --
+    trainer = Trainer(model, data_loader, epochs=epochs, **kwargs)
     train_losses = []
     train_acces = []
-    a_acces = []
     a_losses = []
-    a_loss = 0.
-    a_acc = 0.
     last_print_time = time.time()
-    n_losses = 1
     n_batchs = 0
     header_printed = False
     last_print_epchs = 0
@@ -50,21 +58,16 @@ def train(model, datasets=None, data_loader=None,
         if(ctx.i_epoch>=0):
             # -- Print headers --
             if(header_printed==False):
+                n_losses = len(ctx.losses)
+                a_losses = [0.0 for _ in range(n_losses)]
+                train_losses = [[] for _ in range(n_losses)]
                 header_printed = True
                 print_headers = ['Progress', 'Epoch', 'Batch', 'Batch Time']
-                if(isinstance(ctx.outputs,tuple)):
-                    losses = ctx.outputs[-1]
-                    if(isinstance(losses,tuple)):
-                        n_losses = len(losses)
-                        a_losses.append(0.0)
-                        print_headers += ['loss:' + str(i) for i in range(len(losses))]
-                    else:
-                        print_headers += ['loss', 'acc']
-                else:
-                    print_headers += ['loss', 'acc']
+                print_headers += ['loss:' + str(i) for i in range(n_losses)]
                 print('='*(64+13*n_losses))
                 print('|'.join(format(h, f'^{12}') for h in print_headers))
                 print('|'.join('-'*12 for i in range(len(print_headers))))
+                print('')
 
             if(last_print_epchs != ctx.i_epoch):
                 last_print_epchs = ctx.i_epoch
@@ -78,47 +81,29 @@ def train(model, datasets=None, data_loader=None,
             if(curr_time-last_print_time > 0.2):
                 batch_time = ctx.batch_time
                 progress = (ctx.i_batchs+1)*100.0/ctx.n_batchs
-                if(n_losses==1):
-                    print('|'.join(format(str(item), f'^{12}') for item in [
-                        '{:.2f}%'.format(progress),
-                        ctx.i_epoch+1,
-                        ctx.i_batchs+1,
-                        '{:.3f}s'.format(batch_time), 
-                        '{:.4f}'.format(ctx.loss),
-                        '{:.4f}'.format(ctx.acc)
-                    ]), end='\r')
-                else:
-                    print('|'.join(format(str(item), f'^{12}') for item in [
-                        '{:.2f}%'.format(progress),
-                        ctx.i_epoch+1,
-                        ctx.i_batchs+1,
-                        '{:.3f}s'.format(batch_time), 
-                        *['{:.4f}'.format(loss.item()) for (_, loss) in losses]
-                    ]), end='\r')
+                print('\033[A\033[2K'+'|'.join(format(str(item), f'^{12}') for item in [
+                    '{:.2f}%'.format(progress),
+                    ctx.i_epoch+1,
+                    ctx.i_batchs+1,
+                    '{:.3f}s'.format(batch_time), 
+                    *['{:.4f}'.format(loss) for loss in ctx.losses]
+                ]))
                 last_print_time = curr_time
 
             n_batchs += 1
             n_batch_print = ctx.n_batchs*epochs//100
+            if n_batch_print == 0:
+                n_batch_print = 1
 
             # -- Acc losses --
-            if(n_losses==1):
-                a_loss += ctx.loss/n_batch_print
-                a_acc += ctx.acc/n_batch_print
-            else:
-                for i in range(n_losses):
-                    a_losses[i] += ctx.losses[i]/n_batch_print
+            for i in range(n_losses):
+                a_losses[i] += ctx.losses[i]/n_batch_print
 
             # -- Log Losses --
             if(n_batchs % n_batch_print == 0):
-                if(n_losses == 1):
-                    train_losses.append(a_loss)
-                    train_acces.append(a_acc)
-                    a_loss = 0.0
-                    a_acc = 0.0
-                else:
-                    for i in range(n_losses):
-                        train_losses[i][1].append(a_losses[i])
-                        a_losses[i] = 0.0
+                for i in range(n_losses):
+                    train_losses[i].append(a_losses[i])
+                    a_losses[i] = 0.0
 
     print('\n'+'='*(64+13*n_losses))
 
@@ -127,85 +112,71 @@ def train(model, datasets=None, data_loader=None,
         save_weights(model, persist_filename)
 
         # 图像化输出训练结果
-    if(show_chart and ctx.train_mode!=0):
-        if(ctx.train_mode==3):
-            keys = []
-            for i in range(len(train_losses)):
-                keys.append('loss:'+str(i))
-                plt.plot(train_losses[i][1])
-            plt.xlabel('Iterators')
-            plt.ylabel('Losses')
-            plt.legend(keys, loc='upper right')
-            plt.show()
-        else:
-            plt.plot(train_losses)
-            plt.plot(train_acces)
-            plt.xlabel('Iterators')
-            plt.ylabel('Loss & Acc')
-            plt.legend(['loss', 'acc'], loc='upper right')
-            plt.show()
-
-    return train_losses
+    if(show_chart):
+        keys = []
+        for i in range(len(train_losses)):
+            keys.append('loss:'+str(i))
+            plt.plot(train_losses[i])
+        plt.xlabel('Iterators')
+        plt.ylabel('Losses')
+        plt.legend(keys, loc='upper right')
+        plt.show()
+    if len(train_losses) == 1:
+        return train_losses[0]
+    else:
+        return train_losses
 
 class TrainArgs:
     def __init__(self, **kwargs):
         for key in kwargs:
             setattr(self, key, kwargs[key])
-
+    
 def Trainer(
     model,
-    data_loader = None,
-    loss="CrossEntropyLoss",
-    input_targets=False,
+    data_loader,
+    data_fields=None,
     optimizer="Adam",
     optimizer_kwargs={},
+    loss_metric = None,
+    forward_kwargs={},
     epochs=2,
     **kwargs):
-
+    
     # -- Train Variables --
-    train_mode = 0  # 0 -- Uninitialized, 1 -- Without loss, 2 -- With loss --, 3 -- Dict loss --
+    train_mode = 0  # 0 -- Uninitialized, 2 -- With loss --, 3 -- Dict loss --
     ctx = TrainArgs(
         train_mode = 0,
         n_batchs = len(data_loader),
         i_epoch = 0,
         i_batch = 0,
-        inputs = None,
-        targets = None,
-        outputs = None,
-        losses = [],
-        loss = 0.,
-        acc = 0.
+        losses = []
     )
 
     # -- epochs --
     for ctx.i_epoch in range(epochs):
         # -- iter --
         ctx.i_batchs = -1
-        for (ctx.inputs, ctx.targets) in data_loader:
+        for item in data_loader:
             ctx.i_batchs += 1
             start_time = time.time()
 
             # -- Forward --
-            if(input_targets):
-                ctx.outputs = model(ctx.inputs, targets=ctx.targets)
+            if data_fields is None:
+                (inputs, targets) = item
             else:
-                ctx.outputs = model(ctx.inputs)
+                (inputs, targets) = item[data_fields[0]], item[data_fields[1]]
+            if loss_metric is None:
+                (outputs, loss) = model(inputs, targets=targets, **forward_kwargs)
+            else:
+                outputs = model(inputs)
+                loss = loss_metric(outputs, targets)
 
             # -- Initialize at first time --
             if(ctx.train_mode == 0):
                 # -- Update mode --
-                if(isinstance(ctx.outputs,tuple)):
-                    losses = ctx.outputs[-1]
-                    if(isinstance(losses,tuple)):
-                        ctx.train_mode = 3
-                    else:
-                        ctx.train_mode = 2
-                else:
-                    ctx.train_mode = 1
-                    criterion = getattr(torch.nn,loss)()
-
-                # -- Initialize --
-                if(ctx.train_mode == 3):
+                if(isinstance(loss,tuple)):
+                    ctx.train_mode = 3
+                    ctx.tran_n_losses = len(loss)
                     ctx.train_losses, a_losses, t_optimizers = [], [], []
                     for (m, _) in losses:
                         if(m is None):
@@ -213,36 +184,30 @@ def Trainer(
                         optim = getattr(torch.optim,optimizer)(m.parameters(), **optimizer_kwargs)
                         t_optimizers.append(optim) 
                 else:
+                    ctx.train_mode = 2
+                    ctx.tran_n_losses = 1
                     t_optimizer = getattr(torch.optim,optimizer)(model.parameters(), **optimizer_kwargs)
 
             # -- Backward --
             if(ctx.train_mode != 3):
-                if(ctx.train_mode==2):
-                    (_, loss) = ctx.outputs
-                    ctx.acc = 0.0
-                else:
-                    loss = criterion(ctx.outputs, ctx.targets)
-                    _, predicted = torch.max(ctx.outputs.data, dim = 1)
-                    ctx.acc = (predicted == ctx.targets).sum().item() * 1.0 / ctx.targets.size(0)
-                    
                 t_optimizer.zero_grad()
                 loss.backward()
                 t_optimizer.step()
-                ctx.loss = loss.item()
+                ctx.losses = [loss.item()]
                 curr_time = time.time()
+                ctx.acc = 0.0
                 ctx.batch_time = curr_time-start_time
                 yield ctx
             else:
                 # -- Optimize --
-                (_, losses) = ctx.outputs
                 i=0
                 ctx.losses = []
-                for (_, loss) in losses:
+                for (_, subloss) in loss:
                     optim = t_optimizers[i]
                     optim.zero_grad()
                     retain_graph = True if i != n_losses-1 else False
-                    loss.backward(retain_graph=retain_graph)
-                    ctx.losses.append(loss.item())
+                    subloss.backward(retain_graph=retain_graph)
+                    ctx.losses.append(subloss.item())
                     i+=1
                 for optim in t_optimizers:
                     optim.step()
