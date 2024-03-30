@@ -1,6 +1,6 @@
 # Mamba
 
-A simple mamba demo with minimized code. This repo is just for learning and backup. The code was tested on CPU only for now.
+A simple mamba demo with minimized code. (Note: The code was tested on CPU only for now.)
 
 The major diff to mamba-minimal is: 
 
