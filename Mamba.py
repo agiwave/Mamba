@@ -99,26 +99,25 @@ def MambaBlock(args):
         """
         (b, l, hidden_dim) = x.shape
         
-        deltaA = np.exp(np.einsum('blh,hn->blhn', delta, A))
+        deltaA = np.einsum('blh,hn->blhn', delta, A)                # -> [B, L, h, n]
         hx = np.rearrange('b l (h d)->b l h d', x, h=num_heads)
-        deltaBX = np.einsum('blh,bln,blhd->blhdn', delta, B, hx)
+        deltaB = np.einsum('blh,bln,blhd->blhdn', delta, B, hx)
 
-        # Parallel Version without CUDA, Warning: This ver will take O(b,l,l,d,n) Memories.
-        # 
-        # S(n) = a(1)*...a(n)*S(0) + a(2)*...*a(n)*bx(1) + a(3)*...*a(n)*bx(2) +...+ a(n)*bx(n-1) + b(n)
         #
-        upA = deltaA.unsqueeze(2)                   # -> [B, L, 1, h, n]
+        # Parallel Implementation
+        # 
+        # S(n) = a(1)*...a(n)*S(0) + a(2)*...*a(n)*b(1) + a(3)*...*a(n)*b(2) +...+ a(n)*b(n-1) + b(n)
+        #
+        esp = 1.0e-10
+        cumA = np.exp(np.cumsum(deltaA, dim=1))
+        shiftA = np.pad(1.0 / (cumA + esp), (0,0,0,0,1,-1), value=1.0)
         mask = np.tril(np.ones(l,l))
-        mask = mask[:,:,None,None].unsqueeze(0)     # -> [B, L, L, 1, 1]
-        upA = np.where(mask==0, 1, upA)
-        upA = np.cumprod(upA, dim=1) * mask
-        s_and_ab = np.cat([ssm_state.unsqueeze(1), deltaBX[:,:l-1]], dim=1) # -> [B, L, H, D, N]
-        sumASB = np.einsum('blmhn,blhdn->blhdn', upA, s_and_ab)
-        S = sumASB + deltaBX
+        shiftB = np.cat([ssm_state.unsqueeze(1), deltaB[:,:l-1]], dim=1) # -> [B, L, H, D, N]
+        shiftB = shiftB * shiftA.unsqueeze(-2)
+        S = np.einsum('blhn,lm,bmhdn->blhdn', cumA, mask, shiftB) + deltaB
         ssm_state = S[:,-1]
-
-        S = np.rearrange('b l h d n-> b l (h d) n', S, h=num_heads)
-        y = np.einsum('bldn,bln->bld', S, C)
+        y = np.einsum('blhdn,bln->blhd', S, C)
+        y = np.rearrange('b l h d-> b l (h d)', y, h=num_heads)
         return y + x * D, ssm_state
 
     return __init__(nn.Module(forward = forward, ssm = ssm, selective_scan = selective_scan),args)
