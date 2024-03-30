@@ -11,7 +11,7 @@ The diff to mamba is:
 
 1. Support input n-length tensor in infer mode not only one.
 2. Support parallel training on CPU(without CUDA)
-3. Support num_heads arg which is not D only(element-wise). The oringal mamba's num_heads = D, it means element-wise. 
+3. Support num_heads arg which is not element-wise only. The oringal mamba's num_heads = dim, it means element-wise. 
 
 Please ignore all aka code here. It's a sample proxy to torch:
 
