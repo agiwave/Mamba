@@ -1,16 +1,18 @@
 import aka.nn as nn
 import aka.numpy as np
 
-def MambaBlock(args):
+def MambaBlock(**kwargs):
     """A single Mamba block, as described in Figure 3 in Section 3.4 in the Mamba paper [1]."""
-    def __init__(self, args):
+    def __init__(self, **kwargs):
+        args = nn.Object(**kwargs)
         self.hidden_dim = getattr(args, 'hidden_dim', args.latent_dim)
         self.num_heads = getattr(args, 'num_heads', self.hidden_dim)
+        self.num_states = getattr(args, 'num_states', 16)
         self.dt_rank = getattr(args, 'dt_rank', args.latent_dim//16)
         self.conv_kernel_size = getattr(args, 'conv_kernel_size', 4)
-        self.d_state = getattr(args, 'd_state', 16)
 
-        A = np.repeat(np.arange(1, self.d_state + 1).unsqueeze(0), self.num_heads, 0)
+        # A = np.repeat(np.arange(1, self.num_states + 1).unsqueeze(0), self.num_heads, 0)
+        A = np.repeat(np.arange(1, self.num_heads + 1).unsqueeze(1), self.num_states, 1)
         self.in_proj = nn.Linear(args.latent_dim, self.hidden_dim*2, bias=args.bias)
         self.conv1d = nn.Conv1d(
             in_channels=self.hidden_dim,
@@ -21,7 +23,7 @@ def MambaBlock(args):
             padding=0,
         )
         # x_proj takes in `x` and outputs the input-specific Δ, B, C
-        self.x_proj = nn.Linear(self.hidden_dim, self.dt_rank + self.d_state * 2, bias=False)
+        self.x_proj = nn.Linear(self.hidden_dim, self.dt_rank + self.num_states * 2, bias=False)
         # dt_proj projects Δ from dt_rank to hidden_dim
         self.dt_proj = nn.Linear(self.dt_rank, self.num_heads, bias=True)
         self.A_log = nn.Parameter(np.log(A))
@@ -29,10 +31,46 @@ def MambaBlock(args):
         self.out_proj = nn.Linear(self.hidden_dim, args.latent_dim, bias=args.bias)
         return self
 
+    def rnn(s0, a, b, esp=1.0e-10):
+        '''
+        Args:
+            s:  [b,1,...]
+            a:  [b,l,...]
+            b:  [b,l,...]
+        Formula:
+            S(0) = ssm_state
+            S(n) = a(n) * S(n-1) + b(n)
+            
+        '''
+        l = a.size(1)
+        dim_size = len(a.shape)-2
+        cumA = np.exp(np.cumsum(a, dim=1))
+        mask = np.tril(np.ones(l, l, device=a.device))
+        match dim_size:
+            case 0:
+                shiftA = np.pad(cumA, (1, -1), value=1.0)
+                shiftB = np.cat([s0, b[:,:l-1]], dim=1) / (esp+shiftA)
+                return np.einsum('bl,lm,bm->bl', cumA, mask, shiftB) + b
+            case 1:
+                shiftA = np.pad(cumA, (0, 0, 1, -1), value=1.0)
+                shiftB = np.cat([s0, b[:,:l-1]], dim=1) / (esp+shiftA)
+                return np.einsum('bld,lm,bmd->bld', cumA, mask, shiftB) + b
+            case 2:
+                shiftA = np.pad(cumA, (0, 0, 0, 0, 1, -1), value=1.0)
+                shiftB = np.cat([s0, b[:,:l-1]], dim=1) / (esp+shiftA)
+                return np.einsum('blhd,lm,bmhd->blhd', cumA, mask, shiftB) + b
+            case 3:
+                shiftA = np.pad(cumA, (0, 0, 0, 0, 0, 0, 1, -1), value=1.0)
+                shiftB = np.cat([s0, b[:,:l-1]], dim=1) / (esp+shiftA)
+                return np.einsum('blhdn,lm,bmhdn->blhdn', cumA, mask, shiftB) + b
+            case _:
+                assert False
+
     def forward(self, x, state=None, **kwargs):
         (b, l, d) = x.shape
         (x, gate) = self.in_proj(x).chunk(2, dim=-1)
         
+        # -- Load State --
         x = np.einsum('bld->bdl',x)
         if state is not None:
             n_conv_state = self.conv_kernel_size-1
@@ -41,86 +79,49 @@ def MambaBlock(args):
                 ssm_state = state['ssm_state']
             else:
                 conv_state = np.zeros(b, self.hidden_dim, n_conv_state, device=x.device)
-                ssm_state = np.zeros(b, self.num_heads, self.hidden_dim//self.num_heads, self.d_state, device=x.device)
+                ssm_state = np.zeros(b, self.num_heads, self.hidden_dim//self.num_heads, self.num_states, device=x.device)
             x = np.cat((conv_state, x), dim=2)
         else:
             n_conv_state = 0
-            ssm_state = np.zeros(b, self.num_heads, self.hidden_dim//self.num_heads, self.d_state, device=x.device)
+            ssm_state = np.zeros(b, self.num_heads, self.hidden_dim//self.num_heads, self.num_states, device=x.device)
 
+        # -- Conv --
         if x.size(2) < l + n_conv_state:
             x = np.pad(x, (l + n_conv_state - x.size(2), 0), value=0.)
         y = self.conv1d(x)
         y = np.einsum('bdl->bld', y)
         y = np.silu(y)
-        y, ssm_state = self.ssm(y,ssm_state)
 
+        '''
+        This is the classic state space formula:
+            h(t + 1) = Ah(t) + Bx(t)    --- (1)
+            y(t)     = Ch(t) + Dx(t)
+        Formula (1) is a topic rnn.
+            h(n)     = a(n) * h(n-1) + b(n)
+        '''
+        A = -np.exp(self.A_log.float())  # shape (hidden_dim, n)
+        D = self.D.float() * y
+        x_dbl = self.x_proj(y)  # (b, l, dt_rank + 2*num_states)
+        (delta, B, C) = x_dbl.split(split_size=[self.dt_rank, self.num_states, self.num_states], dim=-1)  # delta: (b, l, dt_rank). B, C: (b, l, n)
+        delta = np.softplus(self.dt_proj(delta))  # (b, l, hidden_dim)
+        # y, ssm_state = ssm(y, delta, A, B, C, D, self.num_heads, ssm_state)  # This is similar to run_SSM(A, B, C, u) in The Annotated S4 [2]
+        deltaA = np.einsum('blh,hn->blhn', delta, A).unsqueeze(-2)                # -> [B, L, h, n]
+        y = np.rearrange('b l (h d)->b l h d', y, h=self.num_heads)
+        deltaB = np.einsum('blh,bln,blhd->blhdn', delta, B, y)
+        S = rnn(ssm_state.unsqueeze(1), deltaA, deltaB)
+        ssm_state = S[:,-1]
+        y = np.einsum('blhdn,bln->blhd', S, C)
+        y = np.rearrange('b l h d-> b l (h d)', y, h=self.num_heads)
+        y = y + D
+
+        # -- Save State --
         if state is not None:
             state['ssm_state'] = ssm_state.detach()
             state['conv_state'] = x[:, :, -n_conv_state:].detach()
             
         y = y * np.silu(gate)
         return self.out_proj(y)
-
-    def ssm(self, x, ssm_state):
-        """
-        Args:
-            x: (b, l, hidden_dim)
-        Returns:
-            output: shape (b, l, hidden_dim)
-        """
-        (hidden_dim, d_state) = self.A_log.shape
-        # Compute ∆ A B C D, the state space parameters.
-        #     A, D are input independent (see Mamba paper [1] Section 3.5.2 "Interpretation of A" for why A isn't selective)
-        #     ∆, B, C are input-dependent (this is a key difference between Mamba and the linear time invariant S4,
-        #                                  and is why Mamba is called **selective** state spaces)
-        A = -np.exp(self.A_log.float())  # shape (hidden_dim, n)
-        D = self.D.float()
-        x_dbl = self.x_proj(x)  # (b, l, dt_rank + 2*d_state)
-        (delta, B, C) = x_dbl.split(split_size=[self.dt_rank, d_state, d_state], dim=-1)  # delta: (b, l, dt_rank). B, C: (b, l, n)
-        delta = np.softplus(self.dt_proj(delta))  # (b, l, hidden_dim)
-        return selective_scan(x, delta, A, B, C, D, self.num_heads, ssm_state)  # This is similar to run_SSM(A, B, C, u) in The Annotated S4 [2]
-
-    def selective_scan(x, delta, A, B, C, D, num_heads, ssm_state):
-        """
-        This is the classic discrete state space formula:
-            h(t + 1) = Ah(t) + Bx(t)
-            y(t)     = Ch(t) + Dx(t)
-            except B and C (and the step size delta, which is used for discretization) are dependent on the input x(t).
-        Args:
-            x: shape (b, l, hidden_dim)    (See Glossary at top for definitions of b, l, hidden_dim, n...)
-            delta: shape (b, l, num_heads)
-            A: shape (num_heads, d_state)
-            B: shape (b, l, d_state)
-            C: shape (b, l, d_state)
-            D: shape (hidden_dim)
-            ssm_state: (b, num_heads, hidden_dim//num_heads, d_state)
-        Returns:
-            output: shape (b, l, hidden_dim), ssm_state
-        """
-        (b, l, hidden_dim) = x.shape
-        
-        deltaA = np.einsum('blh,hn->blhn', delta, A)                # -> [B, L, h, n]
-        hx = np.rearrange('b l (h d)->b l h d', x, h=num_heads)
-        deltaB = np.einsum('blh,bln,blhd->blhdn', delta, B, hx)
-
-        #
-        # Parallel Implementation
-        # 
-        # S(n) = a(1)*...a(n)*S(0) + a(2)*...*a(n)*b(1) + a(3)*...*a(n)*b(2) +...+ a(n)*b(n-1) + b(n)
-        #
-        esp = 1.0e-10
-        cumA = np.exp(np.cumsum(deltaA, dim=1))
-        shiftA = np.pad(1.0 / (cumA + esp), (0,0,0,0,1,-1), value=1.0)
-        mask = np.tril(np.ones(l,l))
-        shiftB = np.cat([ssm_state.unsqueeze(1), deltaB[:,:l-1]], dim=1) # -> [B, L, H, D, N]
-        shiftB = shiftB * shiftA.unsqueeze(-2)
-        S = np.einsum('blhn,lm,bmhdn->blhdn', cumA, mask, shiftB) + deltaB
-        ssm_state = S[:,-1]
-        y = np.einsum('blhdn,bln->blhd', S, C)
-        y = np.rearrange('b l h d-> b l (h d)', y, h=num_heads)
-        return y + x * D, ssm_state
-
-    return __init__(nn.Module(forward = forward, ssm = ssm, selective_scan = selective_scan),args)
+    return __init__(nn.Module(forward = forward), **kwargs)
             
 def Mamba(name):
     import aka.repo as repo
@@ -128,19 +129,19 @@ def Mamba(name):
     # -- Tokenizer --
     tokenizer = repo.AutoTokenizer(name)
     cfg = repo.fopen(name, 'config.json', ftype='json')
-    args = nn.Args(
+    args = dict(
         tokenizer = tokenizer,
         vocab_size = cfg['vocab_size'],
         latent_dim = cfg['d_model'],
         layers = [
-            nn.Args(
+            dict(
                 name = 'Mamba',
                 hidden_dim = cfg['intermediate_size'],
                 num_heads = cfg['intermediate_size'],
                 dt_rank = cfg['d_model']//16,
                 conv_kernel_size = 4,
                 conv_bias = True,
-                d_state = cfg['state_size']
+                num_states = cfg['state_size']
             )
         ]*cfg['n_layer'],
         bias = False
@@ -148,7 +149,7 @@ def Mamba(name):
 
     # -- Model --
     from CausalLM import CausalLM
-    mamba = CausalLM(args)
+    mamba = CausalLM(**args)
     if repo.exist(name, "model.safetensors"):
         with repo.fopen(name, "model.safetensors", ftype='safetensor') as f:
             with np.no_grad():

@@ -2,38 +2,41 @@ import math
 import aka.nn as nn
 import aka.numpy as np
 
-def MetaLayer(name, args):
+def MetaLayer(**kwargs):
     '''
     Build resident meta layer by name. Include: GQA(Group-Query Attention), MLP, GateMLP, ...
     '''
-    def __init__(self, args):
+    def __init__(self, name, **kwargs):
         import importlib
         module = importlib.import_module(name)
         short_name = name.split('./\\')[-1]
         m = getattr(module, short_name+"Block", None)
         assert m is not None, f"Unknown layer:{name}"
-        self.norm = nn.RMSNorm(args.latent_dim)
-        self.layer = m(args)
-        self.scale = None if not getattr(args,'resident_scale',False) else nn.Parameter(np.ones(args.latent_dim))
+        self.norm = nn.RMSNorm(kwargs['latent_dim'])
+        self.layer = m(**kwargs)
+        self.x_gate = None if not kwargs.get('x_gate',False) else nn.Parameter(np.ones(kwargs['latent_dim']))
+        self.resident_gate = None if not kwargs.get('resident_gate',False) else nn.Parameter(np.ones(kwargs['latent_dim']))
         return self
 
     def forward(self, x, **kwargs):
         y = self.norm(x)
-        y = self.layer(y, **kwargs)
-        if self.scale is not None:
-            x = x * self.scale
-        if isinstance(y, tuple):
-            y, loss = y
-            return x + y, loss
+        if self.x_gate is not None:
+            x_gate = np.gelu(self.x_gate)
+            y = self.layer(y, **kwargs)
+            y = y * x_gate
         else:
-            return x + y, None
-    return __init__(nn.Module(forward = forward),args)
+            y = self.layer(y, **kwargs)
+        if self.resident_gate is not None:
+            x = x * np.gelu(self.resident_gate)
+        return x + y, None
+    return __init__(nn.Module(forward = forward), **kwargs)
 
-def CausalLM(args):
+def CausalLM(**kwargs):
     '''
     Causal Language Model.
     '''
-    def __init__(self, args):
+    def __init__(self, **kwargs):
+        args = nn.Object(**kwargs)
         in_proj, out_proj = None, None
         vocab_dim = getattr(args, 'vocab_dim', args.latent_dim)
         if vocab_dim != args.latent_dim:
@@ -60,7 +63,7 @@ def CausalLM(args):
         self.pad_x = pad_x
         self.embedding_scale = (None if not embedding_scale else math.sqrt(vocab_dim))
         self.embedding = nn.Embedding(num_embeddings=args.vocab_size, embedding_dim=vocab_dim)
-        self.layers = nn.ModuleList([make_layer(layer.name, args.cat(layer)) for layer in args.layers])
+        self.layers = nn.ModuleList([make_layer(**dict(layer,**kwargs)) for layer in args.layers])
         self.in_proj = in_proj
         self.out_proj = out_proj
         self.lm_head = None if not lm_head else nn.Linear(vocab_dim, args.vocab_size,bias=False)
@@ -134,12 +137,6 @@ def CausalLM(args):
         with np.no_grad():
             state = {}
             cache = []
-
-            # One by One
-            # for i in range(len(prompt_tokens)-1):
-            #     self(np.array([prompt_tokens[i:i+1]]), state=state)
-            # input_token_ids = np.array([prompt_tokens[-1:]])
-
             input_token_ids = np.array([prompt_tokens])
             for _ in range(max_length):
                 outputs = self(input_token_ids, state=state)
@@ -154,26 +151,6 @@ def CausalLM(args):
                     cache = []
                     yield word
 
-            # Without state
-            # if len(prompt_tokens) > 1:
-            #     self(np.array([prompt_tokens[:-1]]))
-            # input_token_ids = np.array([prompt_tokens])
-            # for _ in range(max_length):
-            #     outputs = self(input_token_ids)
-            #     output_token_ids = np.argmax(outputs[:,-1:,:], dim=-1)
-            #     cache = cache + output_token_ids[0].tolist()
-            #     if self.tokenizer.eos_token_id in input_token_ids:
-            #         break
-
-            #     word = self.tokenizer.decode(cache)
-            #     word_token_ids = self.tokenizer.encode(word)
-            #     if cache == word_token_ids:
-            #         cache = []
-            #         yield word
-
-            #     input_token_ids = np.cat([input_token_ids, output_token_ids], dim=1)
-
-
             if len(cache)>0:
                 yield self.tokenizer.decode(cache)
 
@@ -183,40 +160,4 @@ def CausalLM(args):
             response += w
         return response
         
-    return __init__(nn.Module(forward = forward, generate = generate, generator=generator),args)
-
-def CausalLMArgs(name):
-    mlp_args = nn.Args(
-        name = 'MLP',
-        kv_size = 384*4,
-        kv_gate = True,
-        qk_dim = 384,
-        hidden_dim = 384
-    )
-    attn_args = nn.Args(
-        name = 'Attention',
-        qk_dim = 384,
-        hidden_dim = 384,
-        num_heads = 6,
-        num_kv_groups = 6,
-        rotary_embedding = True,
-    )
-    return nn.Args(
-        vocab_size = 50304,
-        vocab_dim = 64,
-        block_size = 256,
-        latent_dim = 384,
-
-        dropout = 0.2,
-        bias = False, # do we use bias inside LayerNorm and Linear layers?
-        layers = [attn_args, mlp_args]*6,
-    )
-
-if __name__ == "__main__":
-    from RomeArena import TrainArena, RunArena
-    TrainArena([
-        'CausalLM-demo'
-    ], nn.Args(lr = 6e-4, epochs=3))
-    # RunArena([
-    #     'CausalLM-demo'
-    # ], "Paul Daniels (born 4 June 1981 in Burlington)")
+    return __init__(nn.Module(forward = forward, generate = generate, generator=generator),**kwargs)

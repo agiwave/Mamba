@@ -17,6 +17,7 @@ def empty(shape, dtype=None): return boot.invoke()
 def linspace(start, end, steps, *, dtype=None): return boot.invoke()
 
 def nan_to_num(input, nan=0.0, posinf=None, neginf=None): return boot.invoke()
+def clamp(input, min, max): return boot.invoke()
 
 def polar(abs, angle): return boot.invoke()
 def tril(input, diagonal=0): return boot.invoke()
@@ -109,6 +110,8 @@ def mse_loss(input, target, size_average=None, reduce=None, reduction='mean'): r
 def cross_entropy(input, target, weight=None, size_average=None, ignore_index=-100, reduce=None, reduction='mean', label_smoothing=0.0): return boot.invoke()
 def topk(input, k, dim=None, largest=True, sorted=True): return boot.invoke()
 def multinomial(input, num_samples, replacement=False, *, generator=None): return boot.invoke()
+
+def conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1): return boot.invoke()
 
 def device(device): return boot.invoke()
 def set_default_dtype(d): return boot.invoke()
