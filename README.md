@@ -10,8 +10,10 @@ The major diff to mamba-minimal is:
 The diff to mamba is: 
 
 1. Support input n-length tensor in infer mode not only one.
-2. Support parallel training on CPU(without CUDA)
-3. Support num_heads arg which is not element-wise only. The oringal mamba's num_heads = dim, it means element-wise. 
+2. Support parallel training on CPU(without CUDA), :)
+3. Support num_heads arg which is not element-wise only. The oringal mamba's num_heads = dim, it means element-wise.
+
+I'm not sure whether I'm the first one to realizing parallel-RNN without CUDA kernel? If possible, let me know if someone did it before. 
 
 Please ignore all aka code here. It's a sample proxy to torch:
 
