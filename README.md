@@ -26,6 +26,8 @@ shiftb = [ s(0), b(1), ..., b(n-1)]
 s(n) = cuma(n) * ( shiftb(1) / shifta(1) + shiftb(2) / shifta(2) + .... + shiftb(n) / shifta(n)) + b(n)
 ```
 
+Another point is: I found hawk is simplier than manba. The state size is smaller( mamba(num_states, dim), hawk(dim)) but the performance is better. I am investigating it more on this point.
+
 Please ignore all aka code here. It's a sample proxy to torch:
 
     aka.nn --> torch.nn
