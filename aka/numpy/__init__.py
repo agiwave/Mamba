@@ -49,6 +49,7 @@ def view_as_complex(input): return boot.invoke()
 def einsum(equation, *operands): return boot.invoke()
 def rearrange(equation, *operands, **kwargs): return boot.invoke()
 
+def flip(input, dims): return boot.invoke()
 def cumsum(input, dim): return boot.invoke()
 def cumprod(input, dim): return boot.invoke()
 def sum(input): return boot.invoke()

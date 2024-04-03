@@ -68,7 +68,7 @@ def CausalLM(**kwargs):
         self.out_proj = out_proj
         self.lm_head = None if not lm_head else nn.Linear(vocab_dim, args.vocab_size,bias=False)
         self.prev_norm = prev_norm
-        self.post_norm = nn.RMSNorm(args.latent_dim)
+        self.post_norm = nn.RMSNorm(self.vocab_dim)
         self.cache = {}
         return self
 
@@ -101,8 +101,6 @@ def CausalLM(**kwargs):
             if loss is not None:
                 layer_losses.append(loss)
 
-        if self.post_norm is not None:
-            x = self.post_norm(x)
 
         # -- latent_dim --> vocab_dim
         if self.vocab_dim != self.latent_dim:
@@ -110,6 +108,9 @@ def CausalLM(**kwargs):
                 x = np.pad(x, (self.vocab_dim-self.latent_dim,0), mode='constant', value=float(0.0))
             else:
                 x = self.out_proj(x)
+
+        if self.post_norm is not None:
+            x = self.post_norm(x)
 
         # -- vocab_dim --> logits
         if self.lm_head is not None:
@@ -120,9 +121,9 @@ def CausalLM(**kwargs):
         # -- logits --> output
         if(targets is not None):
             loss = np.cross_entropy(y.view(-1, y.size(-1)), targets.reshape(-1), ignore_index=-1)
-            vocab_max = np.max(self.embedding.weight, dim=1)[0]-1.
-            vocab_min = np.min(self.embedding.weight, dim=1)[0]
-            loss += np.mean(vocab_max**2)+np.mean(vocab_min**2)
+            # vocab_max = np.max(self.embedding.weight, dim=1)[0]-1.
+            # vocab_min = np.min(self.embedding.weight, dim=1)[0]
+            # loss += np.mean(vocab_max**2)+np.mean(vocab_min**2)
             if len(layer_losses) > 0:
                 loss += np.sum(np.stack(layer_losses, dim=-1)) / len(layer_losses)
             return y, loss

@@ -23,6 +23,7 @@ def train(
         data_loader = None,
         collate_fn=None,
         persist_filename = None, 
+        persist_per_batchs = None,
         shuffle = True,
         batch_size = 1,
         epochs = 1,
@@ -91,6 +92,9 @@ def train(
                 last_print_time = curr_time
 
             n_batchs += 1
+            if persist_filename is not None and persist_per_batchs is not None:
+                if (n_batchs % persist_per_batchs) == 0:
+                    save_weights(model, persist_filename)
             n_batch_print = ctx.n_batchs*epochs//100
             if n_batch_print == 0:
                 n_batch_print = 1
