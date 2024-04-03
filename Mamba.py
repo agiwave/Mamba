@@ -75,11 +75,18 @@ def MambaBlock(**kwargs):
         deltaB = np.einsum('blh,bln,blhd->blhdn', delta, B, y)
         
         # -- RNN --
-        cumA = np.exp(np.cumsum(deltaA, dim=1))
-        mask = np.tril(np.ones(l, l, device=x.device))
-        shiftA = np.pad(cumA, (0, 0, 0, 0, 0, 0, 1, -1), value=1.0)
-        shiftB = np.cat([ssm_state.unsqueeze(1), deltaB[:,:l-1]], dim=1) / (1e-10+shiftA)
-        S = np.einsum('blhdn,lm,bmhdn->blhdn', cumA, mask, shiftB) + deltaB
+        if False:
+            cumA = np.exp(np.cumsum(deltaA, dim=1))
+            mask = np.tril(np.ones(l, l, device=x.device))
+            shiftA = np.pad(cumA, (0, 0, 0, 0, 0, 0, 1, -1), value=1.0)
+            shiftB = np.cat([ssm_state.unsqueeze(1), deltaB[:,:l-1]], dim=1) / (1e-10+shiftA)
+            S = np.einsum('blhdn,lm,bmhdn->blhdn', cumA, mask, shiftB) + deltaB
+        else: # Accurate Version, May cause [B,L,L,H] memory alloc
+            mask = np.tril(np.ones(l, l, device=x.device))[:,:,None,None,None]   #[l,m,h,d,n]
+            cumA = deltaA.unsqueeze(2) * mask                   #[b,l,1,h,d,n]
+            cumA = np.exp(np.cumsum(cumA, dim=1)) * mask        #[b,l,m,h,d,n]
+            shiftB = np.cat([ssm_state.unsqueeze(1), deltaB[:,:l-1]], dim=1)
+            S = np.einsum('blmhdn,bmhdn->blhdn', cumA, shiftB) + deltaB
         # -- RNN --
         
         ssm_state = S[:,-1]
