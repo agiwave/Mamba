@@ -1,5 +1,13 @@
 torch
 torchvision
 torchtext
-transofrmer
+torchinfo
+transformers
+datasets
+einops
+sentencepiece
+numpy
+tensorflow
+matplotlib
 
+# pip install -e . -i https://mirrors.aliyun.com/pypi/simple/

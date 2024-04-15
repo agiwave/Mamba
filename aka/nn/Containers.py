@@ -2,6 +2,9 @@ from .. import boot
 
 def Module(**kwargs): return boot.invoke()
 def ModuleList(modules=None): return boot.invoke()
+def ModuleDict(modules=None): return boot.invoke()
+def ParameterList(values=None): return boot.invoke()
+def ParameterDict(values=None): return boot.invoke()
 def Parrallel(*parrallel_modules, join_module=None): return boot.invoke()
 def Functional(func, *args, **kwargs): return boot.invoke()
 

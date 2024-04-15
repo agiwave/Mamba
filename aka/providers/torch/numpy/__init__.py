@@ -27,9 +27,9 @@ def array(data, *args, **kwargs):
         img = tensor(numpy.array(img), *args, **kwargs)
         match img.ndim:
             case 2:
-                return rearrange('w h -> c h w', img, c=c)
+                return rearrange('h (w c)-> c h w', img, c=c)
             case 3:
-                return rearrange('w h c-> c h w', img, c=c)
+                return rearrange('h w c-> c h w', img, c=c)
             case _:
                 assert False
     return tensor(data, *args, **kwargs)

@@ -1,5 +1,11 @@
 import aka.nn as nn
 import aka.numpy as np
+try:
+    from CausalScan4d import CausalScan4d
+    causalScan = CausalScan4d.apply
+except ImportError:
+    causalScan = None
+    print('Warn: CausalScan4d import failured.')
 
 def MambaBlock(**kwargs):
     """A single Mamba block, as described in Figure 3 in Section 3.4 in the Mamba paper [1]."""
@@ -36,26 +42,27 @@ def MambaBlock(**kwargs):
         (x, gate) = self.in_proj(x).chunk(2, dim=-1)
         
         # -- Load State --
-        x = np.einsum('bld->bdl',x)
         if state is not None:
             n_conv_state = self.conv_kernel_size-1
             if 'conv_state' in state:
                 conv_state = state['conv_state']
                 ssm_state = state['ssm_state']
             else:
-                conv_state = np.zeros(b, self.hidden_dim, n_conv_state, device=x.device)
-                ssm_state = np.zeros(b, 1, self.num_heads, self.hidden_dim//self.num_heads, self.num_states, device=x.device)
-            x = np.cat((conv_state, x), dim=2)
+                conv_state = np.zeros(b, n_conv_state, self.hidden_dim, dtype=x.dtype, device=x.device)
+                ssm_state = np.zeros(b, 1, self.hidden_dim, self.num_states, dtype=x.dtype, device=x.device)
+            x = np.cat((conv_state, x), dim=1)
+            conv_state = x[:, -n_conv_state:]
         else:
             n_conv_state = 0
-            ssm_state = np.zeros(b, 1, self.num_heads, self.hidden_dim//self.num_heads, self.num_states, device=x.device)
+            ssm_state = np.zeros(b, 1, self.hidden_dim, self.num_states, dtype=x.dtype, device=x.device)
 
         # -- Conv --
+        x = np.einsum('bld->bdl',x)
         if x.size(2) < l + n_conv_state:
             x = np.pad(x, (l + n_conv_state - x.size(2), 0), value=0.)
-        y = self.conv1d(x)
-        y = np.einsum('bdl->bld', y)
-        y = np.silu(y)
+        x = self.conv1d(x)
+        x = np.einsum('bdl->bld', x)
+        x = np.silu(x)
 
         '''
         This is the classic state space formula:
@@ -65,41 +72,51 @@ def MambaBlock(**kwargs):
             h(n)     = a(n) * h(n-1) + b(n)
         '''
         A = -np.exp(self.A_log.float())  # shape (hidden_dim, n)
-        D = self.D.float() * y
-        x_dbl = self.x_proj(y)  # (b, l, dt_rank + 2*num_states)
+        D = self.D.float() * x
+        x_dbl = self.x_proj(x)  # (b, l, dt_rank + 2*num_states)
         (delta, B, C) = x_dbl.split(split_size=[self.dt_rank, self.num_states, self.num_states], dim=-1)  # delta: (b, l, dt_rank). B, C: (b, l, n)
         delta = np.softplus(self.dt_proj(delta))  # (b, l, hidden_dim)
-        # y, ssm_state = ssm(y, delta, A, B, C, D, self.num_heads, ssm_state)  # This is similar to run_SSM(A, B, C, u) in The Annotated S4 [2]
-        deltaA = np.einsum('blh,hn->blhn', delta, A).unsqueeze(-2)                # -> [B, L, h, d, n]
-        y = np.rearrange('b l (h d)->b l h d', y, h=self.num_heads)
-        y_out = np.empty(y.shape, device=y.device)
 
-        # -- Trunc-Wise RNN --
-        (begin, step) = (0, 128)
-        mask = np.tril(np.ones(step, step, device=x.device))[:,:,None,None,None]   #[l,h,k,d]
-        while begin < l:
-            end = begin + step if l-begin>step else l
-            maskA = mask[:end-begin,:end-begin]
-            cumA = deltaA[:,begin:end].unsqueeze(2) * maskA      #[b,l,1,h,d,n]
-            cumA = np.exp(np.cumsum(cumA, dim=1)) * maskA        #[b,l,m,h,d,n]
-            deltaB = np.einsum('blh,bln,blhd->blhdn', delta[:,begin:end], B[:,begin:end], y[:,begin:end])
-            shiftB = np.cat([ssm_state, deltaB[:,begin:end-1]], dim=1)
-            S = np.einsum('blmhdn,bmhdn->blhdn', cumA, shiftB) + deltaB
-            y_out[:,begin:end] = np.einsum('blhdn,bln->blhd', S, C[:,begin:end])
-            ssm_state = S[:,-1:]
-            begin = end
-        # -- RNN --
-
-        y = np.rearrange('b l h d-> b l (h d)', y_out, h=self.num_heads)
-        y = y + D
+        if causalScan is not None:
+            deltaA = np.exp(np.einsum('blh,hn->blhn', delta, A))
+            deltaB = np.einsum('blh,bln->blhn', delta, B)
+            C = C.view(b, l, 1, self.num_states)
+            x = x.unsqueeze(-1)
+            x, ssm_state = causalScan(x, ssm_state, deltaA, deltaB, C)
+            x = x.squeeze(-1)
+        else:
+            # -- Trunc-Wise RNN --
+            x = np.rearrange('b l (h d)->b l h d', x, h=self.num_heads)
+            ssm_state = np.rearrange('b l (h d) n->b l h d n', ssm_state, h=self.num_heads)
+            deltaA = np.einsum('blh,hn->blhn', delta, A).unsqueeze(-2)                # -> [B, L, h, d, n]
+            y_out = np.empty(x.shape, device=x.device)
+            (begin, step) = (0, 64)
+            mask = np.tril(np.ones(step, step, dtype=x.dtype, device=x.device))[:,:,None,None,None]   #[l,h,k,d]
+            while begin < l:
+                end = begin + step if l-begin>step else l
+                maskA = mask[:end-begin,:end-begin]
+                cumA = deltaA[:,begin:end].unsqueeze(2) * maskA      #[b,l,1,h,d,n]
+                cumA = np.exp(np.cumsum(cumA, dim=1)) * maskA        #[b,l,m,h,d,n]
+                deltaB = np.einsum('blh,bln,blhd->blhdn', delta[:,begin:end], B[:,begin:end], x[:,begin:end])
+                shiftB = np.cat([ssm_state, deltaB[:,begin:end-1]], dim=1)
+                S = np.einsum('blmhdn,bmhdn->blhdn', cumA, shiftB) + deltaB
+                y_out[:,begin:end] = np.einsum('blhdn,bln->blhd', S, C[:,begin:end])
+                ssm_state = S[:,-1:]
+                begin = end
+            x = y_out
+            y_out = None
+            ssm_state = np.rearrange('b l h d n->b l (h d) n', ssm_state)
+            x = np.rearrange('b l h d-> b l (h d)', x, h=self.num_heads)
+            # -- RNN --
 
         # -- Save State --
+        x = x + D
         if state is not None:
             state['ssm_state'] = ssm_state.detach()
-            state['conv_state'] = x[:, :, -n_conv_state:].detach()
+            state['conv_state'] = conv_state.detach()
             
-        y = y * np.silu(gate)
-        return self.out_proj(y)
+        x = x * np.silu(gate)
+        return self.out_proj(x)
     return __init__(nn.Module(forward = forward), **kwargs)
             
 def Mamba(name):

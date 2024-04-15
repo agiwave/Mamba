@@ -1,11 +1,11 @@
 from .. import boot
 
-def exist(repo, pathname, **kwargs): return boot.invoke()
-def fopen(repo, pathname, ftype, open_kwargs=None, **kwargs): return boot.invoke()
+def exist(path, pathname, **kwargs): return boot.invoke()
+def fopen(path, pathname, ftype, open_kwargs=None, **kwargs): return boot.invoke()
 
-def AutoModel(repo): return boot.invoke()
-def AutoDataset(repo): return boot.invoke()
-def AutoConfig(repo): return boot.invoke()
-def AutoTokenizer(repo): return boot.invoke()
+def AutoModel(path): return boot.invoke()
+def AutoDataset(path): return boot.invoke()
+def AutoConfig(path): return boot.invoke()
+def AutoTokenizer(path): return boot.invoke()
 
 boot.inject()

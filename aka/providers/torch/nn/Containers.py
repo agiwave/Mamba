@@ -3,7 +3,7 @@ import types
 import torch
 import torch.nn as nn
 from .. import numpy as np
-from torch.nn import ModuleList
+from torch.nn import ModuleList, ModuleDict, ParameterList, ParameterDict
 
 def register_module_and_parameter(container, name, module):
     if( isinstance(module, torch.nn.Module)):
