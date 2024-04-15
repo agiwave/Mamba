@@ -136,7 +136,7 @@ namespace { namespace device {
 
 #undef atomAdd
 #define __PYBINDED__
-#include "./CausalScan4d.hpp"
+#include "./CausalScan4d.cpp"
 torch::Tensor causalScan4d_cuda_Forward(
     torch::Tensor X, 
     torch::Tensor Z, 

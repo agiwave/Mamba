@@ -10,7 +10,7 @@ if cuda.is_available():
     ]) 
 else:
     causal_scan_kernel = ext.load('causalScan4d', [
-        os.path.join(script_dir, 'CausalScan4d.hpp')
+        os.path.join(script_dir, 'CausalScan4d.cpp')
     ]) 
 
 class CausalScan4d(torch.autograd.Function):
