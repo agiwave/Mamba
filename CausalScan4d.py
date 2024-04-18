@@ -1,19 +1,17 @@
+try:
+    import torch.cuda as cuda
+    import torch.utils.cpp_extension as ext
+    import os
+    script_dir = os.path.dirname(__file__)
+    causal_scan_kernel = ext.load('extCausalScan4d', [
+        os.path.join(script_dir, 'CausalScan4d.' + ('cu' if cuda.is_available() else 'cpp'))
+    ])
+except ImportError:
+    causal_scan_kernel = None
+    print('Warn: CausalScan4d import failed.')
+
 import torch
-import torch.cuda as cuda
-import torch.utils.cpp_extension as ext
-import os
-
-script_dir = os.path.dirname(__file__)
-if cuda.is_available():
-    causal_scan_kernel = ext.load('causalScan4d', [
-        os.path.join(script_dir, 'CausalScan4d.cu')
-    ]) 
-else:
-    causal_scan_kernel = ext.load('causalScan4d', [
-        os.path.join(script_dir, 'CausalScan4d.cpp')
-    ]) 
-
-class CausalScan4d(torch.autograd.Function):
+class CausalScan(torch.autograd.Function):
     '''
     Formula:
     h(1) = a(1) * z         + b(1) * x(1)
@@ -27,54 +25,40 @@ class CausalScan4d(torch.autograd.Function):
 
     Return:
     (Y, h(n))
+
+    Args:
+    x : (b, l, d)
+    h : (b, 1, d, n)
+    A : (b, l, d, n)
+    B : (b, l, d, n)
+    C : (b, l, d, n)
+
+    Output:
+    y : (b, l, d)
+    h : (b, 1, d, n)
     '''
     @staticmethod
     def forward(ctx, x, h, A, B, C):
         (x, h, A, B, C) = [item.contiguous() for item in [x, h, A, B, C]]
-        (_, l, _, _) = x.shape
+        x = x.unsqueeze(-1)
+        for item in [x, h, A, B, C]:
+            assert len(item.shape) == 4
+            assert h.size(0) % item.size(0) == 0
+            assert item.size(1) == 1 or item.size(1) == x.size(1)
+            assert h.size(2) % item.size(2) == 0
+            assert item.size(3) == 1 or item.size(3) == h.size(3)
+        assert h.size(1) == 1, 'hidden_state size should be one'
+
         group_size = 1023   # Must match the size in kernel.
-        h = torch.repeat_interleave(h, (l+group_size-1)//group_size+1, dim=1)
-        o = causal_scan_kernel.forward(x, h, A, B, C)
-        ctx.save_for_backward(x, h, A, B, C)
-        return o, h[:,-1:]
+        S = torch.empty(h.size(0), (x.size(1)+group_size-1)//group_size, h.size(2), h.size(3), dtype=h.dtype, device=h.device)
+        y = causal_scan_kernel.forward(x, h, S, A, B, C)
+        ctx.save_for_backward(x, S, A, B, C)
+        return y.squeeze(-1), h
 
     @staticmethod
-    def backward(ctx, gradO, gradZO):
-        x, h, A, B, C = ctx.saved_variables
-        gradX, gradH, gradA, gradB, gradC = causal_scan_kernel.backward(gradO, x, h, A, B, C)
-        return gradX, gradH, gradA, gradB, gradC
+    def backward(ctx, gradO, gradH):
+        x, S, A, B, C = ctx.saved_variables
+        gradX, gradH, gradA, gradB, gradC = causal_scan_kernel.backward(gradO.unsqueeze(-1), gradH, x, S, A, B, C)
+        return gradX.squeeze(-1), gradH, gradA, gradB, gradC
 
-if __name__ == "__main__":
-    device = torch.device("cuda")
-    Z = torch.tensor([
-        [[[1,1,1,1]]]
-    ], device=device, dtype=torch.float)
-    A = torch.tensor([
-        [[[2]]],
-        [[[2]]]
-    ], device=device, dtype=torch.float)
-    B = torch.tensor([
-        [[[3,3,3,3]]],
-        [[[3,3,3,3]]]
-    ], device=device, dtype=torch.float)
-    X = torch.tensor([
-        [[[4]]],
-        [[[4]]]
-    ], device=device, dtype=torch.float)
-    C = torch.tensor([
-        [[[5,5,5,5]]],
-        [[[5,5,5,5]]],
-    ], device=device, dtype=torch.float)
-    (Z, A, B, X, C) = [
-       item.unsqueeze(0)
-        for item in [Z, A, B, X, C]
-    ]
-    (A, B, X, C) = [
-        torch.repeat_interleave(item, 2, dim=1)
-        for item in [A, B, X, C]
-    ]
-    (Z, A, B, X) = [
-        torch.repeat_interleave(item, 2, dim=2)
-        for item in [Z, A, B, X]
-    ]
-    print(causal_scan.apply(Z, A, B, X, C))
+causalScan = None if causal_scan_kernel is None else CausalScan.apply

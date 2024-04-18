@@ -1,47 +1,96 @@
-#include <cuda.h>
-#include <cuda_runtime.h>
-#ifndef __wrap_t__
-#define __wrap_t__
-template <typename scalar_t> struct wrap_t{
-    int b, l, d, n;
-    int stepb, stepl;
-    scalar_t* p;
-};
-#endif//__wrap_t__
+#ifndef __COMMON_H__
+#define __COMMON_H__
+    template <typename scalar_t> struct wrap_t{
+        int b, l, d, n;
+        int stepb, stepl;
+        scalar_t* p;
+    };
+    typedef struct{
+        int x;
+    }INDICS;
+    #define SHIFT_BLOCK_SIZE 8
+    #define BLOCK_SIZE (1<<SHIFT_BLOCK_SIZE)
+    #define SHAPE5D(t) {\
+        (int)t.size(0), (int)t.size(1), (int)t.size(2), (int)t.size(3), \
+        (int)(t.size(1) * t.size(2) * t.size(3)),\
+        t.size(1) == 1 ? 0 : (int)(t.size(2) * t.size(3)),\
+        (scalar_t*)t.data_ptr()\
+    }
+    #define SHAPE5D_Z(t) {\
+        (int)t.size(0), (int)t.size(1), (int)t.size(2), (int)t.size(3), \
+        (int)(t.size(1) * t.size(2) * t.size(3)),\
+        (int)(t.size(2) * t.size(3)),\
+        (scalar_t*)t.data_ptr()\
+    }
+    #define IDX5D(shape) ((ib % shape.b) * shape.stepb + (id % shape.d) * shape.n + in % shape.n)
+    #define Ptr5D(shape) (shape.p + IDX5D(shape))
+    #define GROUP_SIZE 1023
+#endif//__COMMON_H__
 
-#ifndef IDX5D
-#define IDX5D(shape) ((blockIdx.x % shape.b) * shape.stepb + (blockIdx.y % shape.d) * shape.n + threadIdx.x % shape.n)
-#define Ptr5D(shape) (shape.p + IDX5D(shape))
-#endif//IDX5D
-
-#define atomAdd atomicAdd
-#ifndef GROUP_SIZE
-#define GROUP_SIZE 1023
-#endif//
+#ifndef __DISABLE_CUDA__
+    #define DEVICEINDICS 
+    #define CAUSAL_FORWARD causalScan4d_Forward_cuda
+    #define CAUSAL_BACKWARD causalScan4d_Backward_cuda
+    #define atomAdd atomicAdd
+    #include <cuda.h>
+    #include <cuda_runtime.h>
+#else//__DISABLE_CUDA__
+    #ifdef DEVICEINDICS
+        #undef DEVICEINDICS
+    #endif//
+    #ifdef CAUSAL_FORWARD
+        #undef CAUSAL_FORWARD
+    #endif//
+    #ifdef CAUSAL_BACKWARD
+        #undef CAUSAL_BACKWARD
+    #endif//
+    #ifdef __global__
+        #undef __global__
+    #endif//
+    #ifdef atomAdd
+        #undef atomAdd
+    #endif//
+    #define DEVICEINDICS ,const INDICS& blockIdx, const INDICS& threadIdx
+    #define CAUSAL_FORWARD causalScan4d_Forward_cpu
+    #define CAUSAL_BACKWARD causalScan4d_Backward_cpu
+    #define __global__
+    #define atomAdd(p,b) (*(p) = *(p) + (b))
+#endif//__DISABLE_CUDA__
 
 namespace { namespace device {
-    template <typename scalar_t> __global__ void causalScan4d_Forward(
+    template <typename scalar_t> __global__ void CAUSAL_FORWARD(
         const wrap_t<scalar_t> shapeX,
         const wrap_t<scalar_t> shapeZ,
+        const wrap_t<scalar_t> shapeS,
         const wrap_t<scalar_t> shapeA,
         const wrap_t<scalar_t> shapeB,
         const wrap_t<scalar_t> shapeC,
-        const wrap_t<scalar_t> shapeO
+        const wrap_t<scalar_t> shapeO,
+        int range
+        DEVICEINDICS
     )
     {
-        scalar_t * pX = Ptr5D(shapeX);
-        scalar_t * pZ = Ptr5D(shapeZ);
+        int idx = blockIdx.x << SHIFT_BLOCK_SIZE | threadIdx.x;
+        if( idx >= range ) return;
+        int ib = idx / shapeS.stepl;
+        int idn = idx % shapeS.stepl;
+        int id = idn / shapeS.n;
+        int in = idn % shapeS.n;
+
+        int sx = IDX5D(shapeX);
+        scalar_t * pX = shapeX.p + sx;
+        scalar_t * pO = shapeO.p + sx;
+        scalar_t * pZ = shapeZ.p + ib * shapeZ.stepb + idn;
+        scalar_t * pS = shapeS.p + ib * shapeS.stepb + idn;
         scalar_t * pA = Ptr5D(shapeA);
         scalar_t * pB = Ptr5D(shapeB);
         scalar_t * pC = Ptr5D(shapeC);
-        scalar_t * pO = Ptr5D(shapeO);
-        scalar_t * pH = pZ;
         scalar_t zh = *pZ;
         int i = 0;
-        while(i++<shapeO.l) {
+        while(i<shapeO.l) {
             if( i % GROUP_SIZE == 0 ) {
-                pH += shapeZ.stepl;
-                *pH = zh;
+                *pS = zh;
+                pS += shapeS.stepl;
             }
             zh = (*pA) * zh + (*pB) * (*pX);
             atomAdd(pO, ((*pC) * zh));
@@ -50,42 +99,54 @@ namespace { namespace device {
             pB += shapeB.stepl;
             pC += shapeC.stepl;
             pO += shapeO.stepl;
+            i++;
         }
-        pZ[(shapeZ.l-1)*shapeZ.stepl] = zh;
+        *pZ = zh;
     }
 
-    template <typename scalar_t> __global__ void causalScan4d_Backward(
-        scalar_t * pX,
-        scalar_t * pZ,
-        scalar_t * pA,
-        scalar_t * pB,
-        scalar_t * pC,
-        const wrap_t<scalar_t> gradO,
-        const wrap_t<scalar_t> gradX,
-        const wrap_t<scalar_t> gradZ,
-        const wrap_t<scalar_t> gradA,
-        const wrap_t<scalar_t> gradB,
-        const wrap_t<scalar_t> gradC
+    template <typename scalar_t> __global__ void CAUSAL_BACKWARD(
+        const wrap_t<scalar_t> shapeX,
+        const wrap_t<scalar_t> shapeZ,
+        const wrap_t<scalar_t> shapeS,
+        const wrap_t<scalar_t> shapeA,
+        const wrap_t<scalar_t> shapeB,
+        const wrap_t<scalar_t> shapeC,
+        scalar_t * pGradO,
+        scalar_t * pGradX,
+        scalar_t * pGradZ,
+        scalar_t * pGradA,
+        scalar_t * pGradB,
+        scalar_t * pGradC,
+        int range
+        DEVICEINDICS
     )
     {
-        int length = gradO.l;
-        int sx = IDX5D(gradX);
-        int sz = IDX5D(gradZ);
-        int sa = IDX5D(gradA);
-        int sb = IDX5D(gradB);
-        int sc = IDX5D(gradC);
-        pX += sx;
-        pZ += sz;
-        pA += sa;
-        pB += sb;
-        pC += sc;
-        scalar_t * pGradO = gradO.p + sx;
-        scalar_t * pGradX = gradX.p + sx;
-        scalar_t * pGradZ = gradZ.p + sz;
-        scalar_t * pGradA = gradA.p + sa;
-        scalar_t * pGradB = gradB.p + sb;
-        scalar_t * pGradC = gradC.p + sc;
+        int idx = blockIdx.x << SHIFT_BLOCK_SIZE | threadIdx.x;
+        if( idx >= range ) return;
+        int ib = idx / shapeS.stepl;
+        int idn = idx % shapeS.stepl;
+        int id = idn / shapeS.n;
+        int in = idn % shapeS.n;
 
+        int sx = IDX5D(shapeX);
+        int sz = ib * shapeZ.stepb + idn;
+        int ss = ib * shapeS.stepb + idn;
+        int sa = IDX5D(shapeA);
+        int sb = IDX5D(shapeB);
+        int sc = IDX5D(shapeC);
+        scalar_t * pX = shapeX.p + sx;
+        scalar_t * pS = shapeS.p + ss;
+        scalar_t * pA = shapeA.p + sa;
+        scalar_t * pB = shapeB.p + sb;
+        scalar_t * pC = shapeC.p + sc;
+        pGradO += sx;
+        pGradX += sx;
+        pGradZ += sz;
+        pGradA += sa;
+        pGradB += sb;
+        pGradC += sc;
+
+        int length = shapeX.l;
         scalar_t gradh = 0.0;
         scalar_t zhs[GROUP_SIZE+1];
         int groups = (length + GROUP_SIZE - 1) / GROUP_SIZE;
@@ -93,39 +154,40 @@ namespace { namespace device {
             int ibegin = igroups * GROUP_SIZE;
             int group_length = (igroups==groups-1)?(length-ibegin):GROUP_SIZE;
 
-            scalar_t * pIX = pX + ibegin*gradX.stepl;
-            scalar_t * pIA = pA + ibegin*gradA.stepl;
-            scalar_t * pIB = pB + ibegin*gradB.stepl;
-            zhs[0] = pZ[igroups*gradZ.stepl];
+            scalar_t * pIX = pX + ibegin*shapeX.stepl;
+            scalar_t * pIA = pA + ibegin*shapeA.stepl;
+            scalar_t * pIB = pB + ibegin*shapeB.stepl;
+            zhs[0] = (*pS);
+            pS += shapeS.stepl;
             for(int i=0; i<group_length; i++) {
                 zhs[i+1] = (*pIA) * zhs[i] + (*pIB) * (*pIX);
-                pIA += gradA.stepl;
-                pIB += gradB.stepl;
-                pIX += gradX.stepl;
+                pIA += shapeA.stepl;
+                pIB += shapeB.stepl;
+                pIX += shapeX.stepl;
             }
 
             int iend = ibegin + group_length;
-            scalar_t * pIC = pC + iend * gradC.stepl;
-            scalar_t * pIGradO = pGradO + iend * gradO.stepl;
-            scalar_t * pIGradX = pGradX + iend * gradX.stepl;
-            scalar_t * pIGradA = pGradA + iend * gradA.stepl;
-            scalar_t * pIGradB = pGradB + iend * gradB.stepl;
-            scalar_t * pIGradC = pGradC + iend * gradC.stepl;
+            scalar_t * pIC = pC + iend * shapeC.stepl;
+            scalar_t * pIGradO = pGradO + iend * shapeX.stepl;
+            scalar_t * pIGradX = pGradX + iend * shapeX.stepl;
+            scalar_t * pIGradA = pGradA + iend * shapeA.stepl;
+            scalar_t * pIGradB = pGradB + iend * shapeB.stepl;
+            scalar_t * pIGradC = pGradC + iend * shapeC.stepl;
             while(group_length-->0) {
-                pIA -= gradA.stepl;
-                pIB -= gradB.stepl;
-                pIX -= gradX.stepl;
-                pIC -= gradC.stepl;
-                pIGradO -= gradO.stepl;
-                pIGradA -= gradA.stepl;
-                pIGradB -= gradB.stepl;
-                pIGradX -= gradX.stepl;
-                pIGradC -= gradC.stepl;
+                pIA -= shapeA.stepl;
+                pIB -= shapeB.stepl;
+                pIX -= shapeX.stepl;
+                pIC -= shapeC.stepl;
+                pIGradO -= shapeX.stepl;
+                pIGradX -= shapeX.stepl;
+                pIGradA -= shapeA.stepl;
+                pIGradB -= shapeB.stepl;
+                pIGradC -= shapeC.stepl;
 
                 atomAdd(pIGradC, (*pIGradO) * zhs[group_length+1]);
-                gradh += (*pIGradO) * (*pC);
-                atomAdd(pIGradB, gradh * (*pX));
-                atomAdd(pIGradX, gradh * (*pB));
+                gradh += (*pIGradO) * (*pIC);
+                atomAdd(pIGradB, gradh * (*pIX));
+                atomAdd(pIGradX, gradh * (*pIB));
                 atomAdd(pIGradA, zhs[group_length] * gradh);
                 gradh *= (*pIA);
             }
@@ -134,85 +196,148 @@ namespace { namespace device {
     }
 }}
 
-#undef atomAdd
-#define __PYBINDED__
-#include "./CausalScan4d.cpp"
-torch::Tensor causalScan4d_cuda_Forward(
+#ifndef __TORCH_INLINE__
+#define __TORCH_INLINE__
+
+#ifndef __DISABLE_CUDA__
+#define __DISABLE_CUDA__
+#include "CausalScan4d.cu"
+#undef __DISABLE_CUDA__
+#endif//__DISABLE_CUDA__
+
+#include <torch/extension.h>
+#include <vector>
+torch::Tensor causalScan4d_Forward(
     torch::Tensor X, 
     torch::Tensor Z, 
-    torch::Tensor A,
-    torch::Tensor B, 
-    torch::Tensor C
-) {
-    if(!X.is_cuda()) {
-        return causalScan4d_cpu_Forward(X, Z, A, B, C);
-    }
-
-    auto O = torch::zeros_like(X);
-    AT_DISPATCH_FLOATING_TYPES(O.type(), "causalScan4d_Forward", ([&] {
-        wrap_t<scalar_t> shapeX = SHAPE5D(X);
-        wrap_t<scalar_t> shapeZ = SHAPE5D(Z);
-        wrap_t<scalar_t> shapeA = SHAPE5D(A);
-        wrap_t<scalar_t> shapeB = SHAPE5D(B);
-        wrap_t<scalar_t> shapeC = SHAPE5D(C);
-        wrap_t<scalar_t> shapeO = SHAPE5D(O);
-        int threads = shapeZ.n;
-        const dim3 blocks(shapeZ.b, shapeZ.d);    
-        device::causalScan4d_Forward<scalar_t><<<blocks, threads>>>(
-            shapeX,
-            shapeZ,
-            shapeA,
-            shapeB,
-            shapeC,
-            shapeO
-        );
-    }));
-    return O;
-}
-
-std::vector<torch::Tensor> causalScan4d_cuda_Backward(
-    torch::Tensor gradO,
-    torch::Tensor X,
-    torch::Tensor Z,
+    torch::Tensor S,
     torch::Tensor A,
     torch::Tensor B,
     torch::Tensor C
 ) {
-    if(!gradO.is_cuda()) {
-        return causalScan4d_cpu_Backward(gradO, X, Z, A, B, C);
+    auto O = torch::zeros_like(X);
+    int range = (int)(Z.size(0) * Z.size(2) * Z.size(3));
+    if(X.is_cuda()){
+        #ifndef __DISABLE_CUDA__
+        AT_DISPATCH_FLOATING_TYPES(X.scalar_type(), "causalScan4d_Forward", ([&] {
+            wrap_t<scalar_t> shapeX = SHAPE5D_Z(X);
+            wrap_t<scalar_t> shapeZ = SHAPE5D_Z(Z);
+            wrap_t<scalar_t> shapeS = SHAPE5D_Z(S);
+            wrap_t<scalar_t> shapeA = SHAPE5D(A);
+            wrap_t<scalar_t> shapeB = SHAPE5D(B);
+            wrap_t<scalar_t> shapeC = SHAPE5D(C);
+            wrap_t<scalar_t> shapeO = SHAPE5D_Z(O);
+            int blocks = (range + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            device::causalScan4d_Forward_cuda<scalar_t><<<blocks, BLOCK_SIZE>>>(
+                shapeX, shapeZ, shapeS, shapeA, shapeB, shapeC, shapeO,
+                range
+            );
+        }));
+        #else
+        AT_ASSERT(false);
+        #endif//__DISABLE_CUDA__
+    }else{
+        AT_DISPATCH_FLOATING_TYPES(X.scalar_type(), "causalScan4d_Forward", ([&] {
+            wrap_t<scalar_t> shapeX = SHAPE5D_Z(X);
+            wrap_t<scalar_t> shapeZ = SHAPE5D_Z(Z);
+            wrap_t<scalar_t> shapeS = SHAPE5D_Z(S);
+            wrap_t<scalar_t> shapeA = SHAPE5D(A);
+            wrap_t<scalar_t> shapeB = SHAPE5D(B);
+            wrap_t<scalar_t> shapeC = SHAPE5D(C);
+            wrap_t<scalar_t> shapeO = SHAPE5D_Z(O);
+            at::parallel_for(0, shapeZ.b*shapeZ.d, 0, [&](int64_t start, int64_t end){
+                while(start<end){
+                    for(int in=0; in<shapeZ.n; in++)
+                    {
+                        int pos = start * shapeZ.n + in;
+                        INDICS indics[] = {
+                            {(int)(pos >> SHIFT_BLOCK_SIZE )},
+                            {(int)(pos % BLOCK_SIZE)}
+                        };
+                        device::causalScan4d_Forward_cpu<scalar_t>(
+                            shapeX, shapeZ, shapeS, shapeA, shapeB, shapeC, shapeO,
+                            range,
+                            indics[0], indics[1]
+                        );
+                    }
+                    start++;
+                };
+            });
+        }));
     }
+    return O;
+}
+
+std::vector<torch::Tensor> causalScan4d_Backward(
+    torch::Tensor gradO,
+    torch::Tensor gradZ,
+    torch::Tensor X, 
+    torch::Tensor S,
+    torch::Tensor A,
+    torch::Tensor B, 
+    torch::Tensor C
+) {
     auto gradX = torch::zeros_like(X);
-    auto gradZ = torch::zeros_like(Z);
     auto gradA = torch::zeros_like(A);
     auto gradB = torch::zeros_like(B);
     auto gradC = torch::zeros_like(C);
-    AT_DISPATCH_FLOATING_TYPES(gradO.type(), "causalScan4d_Backward", ([&] {
-        wrap_t<scalar_t> deltaO = SHAPE5D(gradO);
-        wrap_t<scalar_t> deltaX = SHAPE5D(gradX);
-        wrap_t<scalar_t> deltaZ = SHAPE5D(gradZ);
-        wrap_t<scalar_t> deltaA = SHAPE5D(gradA);
-        wrap_t<scalar_t> deltaB = SHAPE5D(gradB);
-        wrap_t<scalar_t> deltaC = SHAPE5D(gradC);
-        int threads = deltaZ.n;
-        const dim3 blocks(deltaZ.b, deltaZ.d);
-        device::causalScan4d_Backward<scalar_t><<<blocks, threads>>>(
-            (scalar_t*)X.data_ptr(),
-            (scalar_t*)Z.data_ptr(),
-            (scalar_t*)A.data_ptr(),
-            (scalar_t*)B.data_ptr(),
-            (scalar_t*)C.data_ptr(),
-            deltaO,
-            deltaX,
-            deltaZ,
-            deltaA,
-            deltaB,
-            deltaC
-        );
-    }));
+    int range = (int)(S.size(0) * S.size(2) * S.size(3));
+    if(gradO.is_cuda()) {
+        #ifndef __DISABLE_CUDA__
+        AT_DISPATCH_FLOATING_TYPES(X.scalar_type(), "causalScan4d_Backward", ([&] {
+            wrap_t<scalar_t> shapeX = SHAPE5D_Z(X);
+            wrap_t<scalar_t> shapeZ = SHAPE5D_Z(gradZ);
+            wrap_t<scalar_t> shapeS = SHAPE5D_Z(S);
+            wrap_t<scalar_t> shapeA = SHAPE5D(A);
+            wrap_t<scalar_t> shapeB = SHAPE5D(B);
+            wrap_t<scalar_t> shapeC = SHAPE5D(C);
+            int blocks = (range + BLOCK_SIZE - 1) >> SHIFT_BLOCK_SIZE;
+            device::causalScan4d_Backward_cuda<scalar_t><<<blocks, BLOCK_SIZE>>>(
+                shapeX, shapeZ, shapeS, shapeA, shapeB, shapeC, 
+                (scalar_t*)gradO.data_ptr(),
+                (scalar_t*)gradX.data_ptr(),
+                (scalar_t*)gradZ.data_ptr(),
+                (scalar_t*)gradA.data_ptr(),
+                (scalar_t*)gradB.data_ptr(),
+                (scalar_t*)gradC.data_ptr(),
+                range
+            );
+        }));
+        #else
+        AT_ASSERT(false);
+        #endif//__DISABLE_CUDA__
+    }else{
+        AT_DISPATCH_FLOATING_TYPES(X.scalar_type(), "causalScan4d_Backward", ([&] {
+            wrap_t<scalar_t> shapeX = SHAPE5D_Z(X);
+            wrap_t<scalar_t> shapeZ = SHAPE5D_Z(gradZ);
+            wrap_t<scalar_t> shapeS = SHAPE5D_Z(S);
+            wrap_t<scalar_t> shapeA = SHAPE5D(A);
+            wrap_t<scalar_t> shapeB = SHAPE5D(B);
+            wrap_t<scalar_t> shapeC = SHAPE5D(C);
+            for(int start=0; start<range; start++){
+                INDICS indics[] = {
+                    {(int)(start >> SHIFT_BLOCK_SIZE)},
+                    {(int)(start % BLOCK_SIZE)}
+                };
+                device::causalScan4d_Backward_cpu<scalar_t>(
+                    shapeX, shapeZ, shapeS, shapeA, shapeB, shapeC, 
+                    (scalar_t*)gradO.data_ptr(),
+                    (scalar_t*)gradX.data_ptr(),
+                    (scalar_t*)gradZ.data_ptr(),
+                    (scalar_t*)gradA.data_ptr(),
+                    (scalar_t*)gradB.data_ptr(),
+                    (scalar_t*)gradC.data_ptr(),
+                    range,
+                    indics[0], indics[1]
+                );
+            }
+        }));
+    }
     return {gradX, gradZ, gradA, gradB, gradC};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("forward", &causalScan4d_cuda_Forward, "");
-    m.def("backward", &causalScan4d_cuda_Backward, "");
+    m.def("forward", &causalScan4d_Forward, "");
+    m.def("backward", &causalScan4d_Backward, "");
 }
+#endif//__TORCH_INLINE__

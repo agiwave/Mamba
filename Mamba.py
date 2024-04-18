@@ -1,11 +1,6 @@
 import aka.nn as nn
 import aka.numpy as np
-try:
-    from CausalScan4d import CausalScan4d
-    causalScan = CausalScan4d.apply
-except ImportError:
-    causalScan = None
-    print('Warn: CausalScan4d import failured.')
+from CausalScan4d import causalScan
 
 def MambaBlock(**kwargs):
     """A single Mamba block, as described in Figure 3 in Section 3.4 in the Mamba paper [1]."""
@@ -81,9 +76,7 @@ def MambaBlock(**kwargs):
             deltaA = np.exp(np.einsum('blh,hn->blhn', delta, A))
             deltaB = np.einsum('blh,bln->blhn', delta, B)
             C = C.view(b, l, 1, self.num_states)
-            x = x.unsqueeze(-1)
             x, ssm_state = causalScan(x, ssm_state, deltaA, deltaB, C)
-            x = x.squeeze(-1)
         else:
             # -- Trunc-Wise RNN --
             x = np.rearrange('b l (h d)->b l h d', x, h=self.num_heads)
@@ -165,7 +158,37 @@ def Mamba(name):
     return mamba
 
 if __name__ == "__main__":
-    mamba = Mamba('data/mamba-370m-hf')
-    print('Model loaded')
-    for w in mamba.generator("Mamba is"):
-        print(w, end='')
+    # mamba = Mamba('data/mamba-370m-hf')
+    # print('Model loaded')
+    # for w in mamba.generator("Mamba is"):
+    #     print(w, end='')
+
+    args = dict(
+        vocab_dim = 64,
+        latent_dim = 384,
+        xproj_heads = 4,
+        resident_gate = True,
+        gate='go',
+        activation='silu',
+        dropout = 0.1,
+        bias = False
+    )
+    roles = [
+        dict( args, name = 'Mamba',
+            layers = [
+                dict(
+                    name='Mamba', 
+                    num_heads=64,
+                    mixers = [
+                        dict(
+                            name = 'Conv1d'
+                        )
+                    ], 
+                )
+            ] * 12
+        )
+    ]
+    from RomeArena import TrainRoles, RunRoles
+    # PlotRoles(roles, np.load('examples/text/hawk-losses.ckt'))
+    l = TrainRoles(roles, lr = 6e-3, epochs=1, batch_size=4, show=True, show_frequency=2)
+    # RunRoles(roles, 'My lord Sebastian')
